@@ -69,13 +69,61 @@ module StepanV
         end
       end
 
-      def find_top_by_name(model, name)
-        top_objects(model).find { |e| e.name == name }
+      # A "collection group" is a top-level group created from a Blender
+      # collection; marked with an attribute and tagged with its name.
+      def collection_group?(e)
+        e.is_a?(Sketchup::Group) &&
+          e.get_attribute('su_blender_sync', 'collection')
+      end
+
+      def collection_groups(model)
+        top_objects(model).select { |e| collection_group?(e) }
+      end
+
+      def ensure_collection_group(model, name)
+        g = collection_groups(model).find { |e| e.name == name }
+        return g if g
+        g = model.entities.add_group
+        g.name = name
+        g.set_attribute('su_blender_sync', 'collection', true)
+        g.layer = model.layers.add(name)
+        g
+      end
+
+      def prune_empty_collection_groups(model)
+        collection_groups(model).each do |g|
+          g.erase! if g.valid? && definition_of(g).entities.size.zero?
+        end
+      end
+
+      # All synced objects as [[instance, collection_name_or_nil], ...]:
+      # top-level groups/components, plus children of collection groups.
+      def sync_units(model)
+        units = []
+        top_objects(model).each do |e|
+          if collection_group?(e)
+            definition_of(e).entities.to_a.each do |c|
+              next unless c.is_a?(Sketchup::Group) ||
+                          c.is_a?(Sketchup::ComponentInstance)
+              units << [c, e.name]
+            end
+          else
+            units << [e, nil]
+          end
+        end
+        units
+      end
+
+      def find_sync_object(model, name)
+        sync_units(model).each do |inst, _c|
+          return inst if inst.name == name
+        end
+        nil
       end
 
       # Give stable names to unnamed top-level groups/instances (pre-save).
       def ensure_names(model)
-        unnamed = top_objects(model).select { |e| e.name.to_s.empty? }
+        unnamed = sync_units(model).map(&:first).select { |e| e.name.to_s.empty? }
         return if unnamed.empty?
         model.start_operation('Sync: name objects', true)
         unnamed.each { |e| e.name = format('Obj_%06x', rand(0xffffff)) }
@@ -129,17 +177,19 @@ module StepanV
         changed = false
         seen = {}
 
-        top_objects(model).each do |inst|
+        sync_units(model).each do |inst, cname|
           name = inst.name.to_s
           next if name.empty?
           seen[name] = true
           h  = local_hash(inst)
           st = state['objects'][name]
-          if st && st['local_hash'] == h && !st['deleted']
+          if st && st['local_hash'] == h && st['collection'] == cname &&
+             !st['deleted']
             next # unchanged since last apply/export — keep rev (no echo)
           end
           state['objects'][name] = {
-            'rev' => rev_new, 'origin' => 'sketchup', 'local_hash' => h
+            'rev' => rev_new, 'origin' => 'sketchup', 'local_hash' => h,
+            'collection' => cname
           }
           changed = true
         end
@@ -158,7 +208,8 @@ module StepanV
         manifest = {
           'seq' => state['seq'], 'saved_at' => Time.now.to_i,
           'objects' => state['objects'].each_with_object({}) do |(n, st), h2|
-            h2[n] = { 'rev' => st['rev'], 'deleted' => !!st['deleted'] }
+            h2[n] = { 'rev' => st['rev'], 'deleted' => !!st['deleted'],
+                      'collection' => st['collection'] }
           end
         }
         # manifest written AFTER the glb so the receiver never sees a half file
@@ -202,7 +253,11 @@ module StepanV
           cur = state['objects'][name]
           cur_rev = cur ? cur['rev'].to_i : -1
           next unless o['rev'].to_i > cur_rev
-          o['deleted'] ? to_del << [name, o['rev']] : to_apply << [name, o['rev']]
+          if o['deleted']
+            to_del << [name, o['rev']]
+          else
+            to_apply << [name, o['rev'], o['collection']]
+          end
         end
         return if to_apply.empty? && to_del.empty?
 
@@ -221,11 +276,12 @@ module StepanV
       def apply_deletions(model, to_del, state)
         model.start_operation('Sync: delete from Blender', true)
         to_del.each do |name, rev|
-          obj = find_top_by_name(model, name)
+          obj = find_sync_object(model, name)
           obj.erase! if obj
           state['objects'][name] = { 'rev' => rev, 'origin' => 'blender',
                                      'deleted' => true }
         end
+        prune_empty_collection_groups(model)
         model.commit_operation
       end
 
@@ -243,32 +299,46 @@ module StepanV
         children = definition_of(container).entities.to_a.select do |e|
           e.is_a?(Sketchup::Group) || e.is_a?(Sketchup::ComponentInstance)
         end
+        # name -> [entity, world_transform]; index one level deeper too, in
+        # case the sender wrapped objects into collection nodes
         by_name = {}
         children.each do |c|
           n = c.name.to_s
           n = definition_of(c).name.to_s if n.empty?
-          by_name[n] = c unless n.empty?
+          by_name[n] = [c, ct * c.transformation] unless n.empty?
+          definition_of(c).entities.to_a.each do |cc|
+            next unless cc.is_a?(Sketchup::Group) ||
+                        cc.is_a?(Sketchup::ComponentInstance)
+            nn = cc.name.to_s
+            next if nn.empty? || by_name.key?(nn)
+            by_name[nn] = [cc, ct * c.transformation * cc.transformation]
+          end
         end
 
         mats_touched = {}
-        to_apply.each do |name, rev|
-          src = by_name[name] ||
-                by_name.find { |k, _| k.sub(/[#.]\d+$/, '') == name }&.last
+        to_apply.each do |name, rev, cname|
+          src, wt = by_name[name] ||
+                    by_name.find { |k, _| k.sub(/[#.]\d+$/, '') == name }&.last
           unless src
             log("pull: object '#{name}' not found in incoming GLB")
             next
           end
-          old = find_top_by_name(model, name)
+          old = find_sync_object(model, name)
           old.erase! if old
-          ni = model.entities.add_instance(definition_of(src), ct * src.transformation)
+          parent = cname ? ensure_collection_group(model, cname).entities
+                         : model.entities
+          ni = parent.add_instance(definition_of(src), wt)
           ni.name = name
+          ni.layer = model.layers.add(cname) if cname
           cleanup!(ni, mats_touched)
           state['objects'][name] = {
-            'rev' => rev, 'origin' => 'blender', 'local_hash' => local_hash(ni)
+            'rev' => rev, 'origin' => 'blender',
+            'local_hash' => local_hash(ni), 'collection' => cname
           }
         end
 
         container.erase! if container.valid?
+        prune_empty_collection_groups(model)
         shrink_textures(mats_touched.keys)
         model.commit_operation
 

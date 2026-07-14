@@ -17,9 +17,15 @@
 
 ```json
 { "seq": 7, "saved_at": 1752500000,
-  "objects": { "Chair": { "rev": 7, "deleted": false },
+  "objects": { "Chair":   { "rev": 7, "deleted": false, "collection": "Furniture" },
+               "Terrain": { "rev": 3, "deleted": false, "collection": null },
                "OldLamp": { "rev": 6, "deleted": true } } }
 ```
+
+`collection` — имя вложенной коллекции Blender. На стороне SketchUp такой объект
+кладётся во «группу-коллекцию» верхнего уровня с этим именем (помечена атрибутом
+`su_blender_sync/collection`) и получает Tag с именем коллекции. Смена коллекции
+учитывается при сравнении состояния и поднимает ревизию даже без изменения геометрии.
 
 ## Состояние стороны (state_*.json)
 
@@ -68,13 +74,4 @@ SketchUp при импорте сливает треугольники и мен
 3. **`model.import` GLB** — не должен открывать диалог размещения; если открывает,
    переходить на импорт через временный отдельный процесс/деф (см. import_glb fallback).
 4. **Blender export в таймере** — если `bpy.ops.export_scene.gltf` ругается на
-   контекст, обернуть в `bpy.context.temp_override(...)` с первым окном.
-
-## Исследовательская база (прецеденты)
-
-- TCP-мост внутри SketchUp: [zinin/sketchup-mcp2](https://github.com/zinin/sketchup-mcp2),
-  [mhyrr/sketchup-mcp](https://github.com/mhyrr/sketchup-mcp)
-- Blender-сторона: [ahujasid/blender-mcp](https://github.com/ahujasid/blender-mcp)
-- Полный real-time sync (эталон архитектуры): [ubisoft/mixer](https://github.com/ubisoft/mixer)
-- Observers best practices: [Observers2016.pdf](https://assets.sketchup.com/files/ewh/Observers2016.pdf)
-- Обмен через сервер: [Speckle](https://speckle.systems/integrations/)
+   контекст, обернуть в `bpy.context.temp_override(...)` с

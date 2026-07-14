@@ -9,7 +9,7 @@
 bl_info = {
     "name": "SketchUp Sync (save-based bridge)",
     "author": "Stepan",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 0, 0),
     "location": "Properties > Scene > SketchUp Sync",
     "description": "Sync geometry+materials with SketchUp via a GLB bridge on save",
@@ -73,6 +73,33 @@ def get_collection(create=False):
 
 def enabled():
     return bpy.context.scene.get("su_sync_enabled", True)
+
+
+def sync_units(col):
+    """[(object, collection_name_or_None), ...] — objects directly in the
+    sync collection, plus objects of its direct child collections. A child
+    collection becomes a group + tag with its name on the SketchUp side."""
+    units = []
+    for o in col.objects:
+        if o.parent is None:
+            units.append((o, None))
+    for sub in col.children:
+        for o in sub.all_objects:
+            if o.parent is None:
+                units.append((o, sub.name))
+    return units
+
+
+def ensure_subcollection(col, name):
+    sub = bpy.data.collections.get(name)
+    if sub is None:
+        sub = bpy.data.collections.new(name)
+    if all(c.name != name for c in col.children):
+        try:
+            col.children.link(sub)
+        except Exception:
+            pass
+    return sub
 
 
 def strip_suffix(name):
@@ -162,15 +189,17 @@ def do_push():
         changed = False
         seen = set()
 
-        tops = [o for o in col.objects if o.parent is None]
-        for o in tops:
+        for o, cname in sync_units(col):
             seen.add(o.name)
             hh = obj_hash(o)
             st = state["objects"].get(o.name)
-            if st and st.get("local_hash") == hh and not st.get("deleted"):
+            if (st and st.get("local_hash") == hh
+                    and st.get("collection") == cname
+                    and not st.get("deleted")):
                 continue  # unchanged since last apply/export — keep rev
             state["objects"][o.name] = {
-                "rev": rev_new, "origin": "blender", "local_hash": hh}
+                "rev": rev_new, "origin": "blender",
+                "local_hash": hh, "collection": cname}
             changed = True
 
         for name, st in list(state["objects"].items()):
@@ -185,7 +214,9 @@ def do_push():
         export_glb(os.path.join(d, OUT_GLB), col)
         manifest = {
             "seq": state["seq"], "saved_at": int(time.time()),
-            "objects": {n: {"rev": st["rev"], "deleted": bool(st.get("deleted"))}
+            "objects": {n: {"rev": st["rev"],
+                            "deleted": bool(st.get("deleted")),
+                            "collection": st.get("collection")}
                         for n, st in state["objects"].items()},
         }
         # manifest AFTER glb so SketchUp never reads a half-written file
@@ -250,7 +281,10 @@ def do_pull(force=False):
     for name, o in (manifest.get("objects") or {}).items():
         cur = state["objects"].get(name, {}).get("rev", -1)
         if o["rev"] > cur:
-            (to_del if o.get("deleted") else to_apply).append((name, o["rev"]))
+            if o.get("deleted"):
+                to_del.append((name, o["rev"]))
+            else:
+                to_apply.append((name, o["rev"], o.get("collection")))
     if not to_apply and not to_del:
         return
 
@@ -260,7 +294,7 @@ def do_pull(force=False):
 
         for name, rev in to_del:
             o = bpy.data.objects.get(name)
-            if o and o.name in col.objects:
+            if o and o.name in col.all_objects:
                 delete_hierarchy(o)
             state["objects"][name] = {
                 "rev": rev, "origin": "sketchup", "deleted": True}
@@ -282,7 +316,7 @@ def apply_imports(d, col, to_apply, state):
 
     # free the target names so the importer doesn't get ".001" suffixes
     renamed = []
-    for name, _rev in to_apply:
+    for name, _rev, _c in to_apply:
         o = bpy.data.objects.get(name)
         if o:
             o.name = name + ".__old"
@@ -308,18 +342,28 @@ def apply_imports(d, col, to_apply, state):
     for o in imported_tops:
         by_name.setdefault(strip_suffix(o.name), o)
         by_name.setdefault(o.name, o)
+    # one level deeper: children of collection-group wrappers from SketchUp
+    for o in imported_tops:
+        for c in o.children:
+            by_name.setdefault(strip_suffix(c.name), c)
+            by_name.setdefault(c.name, c)
 
     applied_names = set()
-    for name, rev in to_apply:
+    for name, rev, cname in to_apply:
         src = by_name.get(name)
         if src is None:
             log("object '%s' not found in incoming GLB" % name)
             continue
-        # move the whole hierarchy into the sync collection
+        if src.parent is not None:  # unwrap from a collection-group node
+            mw = src.matrix_world.copy()
+            src.parent = None
+            src.matrix_world = mw
+        # move the whole hierarchy into the right collection
+        target = ensure_subcollection(col, cname) if cname else col
         for ob in hierarchy(src):
             for c in list(ob.users_collection):
                 c.objects.unlink(ob)
-            col.objects.link(ob)
+            target.objects.link(ob)
         # remove the old version
         old = bpy.data.objects.get(name + ".__old")
         if old:
@@ -327,7 +371,8 @@ def apply_imports(d, col, to_apply, state):
         src.name = name
         applied_names.add(name)
         state["objects"][name] = {
-            "rev": rev, "origin": "sketchup", "local_hash": obj_hash(src)}
+            "rev": rev, "origin": "sketchup",
+            "local_hash": obj_hash(src), "collection": cname}
 
     # restore names of holders whose replacement never arrived
     for name, o in renamed:
@@ -341,6 +386,14 @@ def apply_imports(d, col, to_apply, state):
     for o in list(tmp.objects):
         delete_hierarchy(o)
     bpy.data.collections.remove(tmp)
+
+    # prune empty sub-collections after moves/deletions
+    for sub in list(col.children):
+        if not sub.all_objects:
+            try:
+                bpy.data.collections.remove(sub)
+            except Exception:
+                pass
 
 
 # -------------------------------------------------------- handlers/timer ---
