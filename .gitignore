@@ -1,0 +1,14 @@
+# bridge folders and test projects
+.su_blender_sync/
+*.skp
+*.blend
+*.blend1
+*.glb
+
+# OS noise
+Thumbs.db
+.DS_Store
+
+# python
+__pycache__/
+*.pyc
