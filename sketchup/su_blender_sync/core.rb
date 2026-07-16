@@ -31,13 +31,30 @@ module StepanV
     COPLANAR_EPS   = 0.001        # inches: vertex distance to shared plane
     TEXTURE_MAX_PX = 1024
 
-    @enabled       = true
+    # Sync is OFF by default; the toggle persists across sessions.
+    @enabled       = Sketchup.read_default('su_blender_sync', 'enabled', false)
     @applying      = false
     @last_in_mtime = nil
     @observed      = {}
 
     class << self
       attr_accessor :enabled, :applying, :last_in_mtime
+
+      def set_enabled(v)
+        @enabled = v ? true : false
+        Sketchup.write_default('su_blender_sync', 'enabled', @enabled)
+      end
+
+      # Guard against SketchUp auto-save: onPostSaveModel may fire when the
+      # user did NOT explicitly save. A real save rewrites the .skp on disk,
+      # so we only push when the file was written within the last seconds.
+      def real_save?(model)
+        p = model.path.to_s
+        return false if p.empty? || !File.exist?(p)
+        (Time.now - File.mtime(p)) < 5
+      rescue StandardError
+        false
+      end
 
       # ------------------------------------------------------------ paths ---
 
@@ -513,7 +530,9 @@ module StepanV
       end
 
       def onPostSaveModel(model)
-        SuBlenderSync.push!(model) if SuBlenderSync.enabled
+        return unless SuBlenderSync.enabled
+        return unless SuBlenderSync.real_save?(model) # skip auto-save
+        SuBlenderSync.push!(model)
       end
     end
 
@@ -548,7 +567,7 @@ module StepanV
         dir ? UI.openURL("file:///#{dir.tr('\\', '/')}") : UI.messagebox('Save the model first.')
       end
       item = menu.add_item('Enabled') do
-        SuBlenderSync.enabled = !SuBlenderSync.enabled
+        SuBlenderSync.set_enabled(!SuBlenderSync.enabled)
       end
       menu.set_validation_proc(item) do
         SuBlenderSync.enabled ? MF_CHECKED : MF_UNCHECKED

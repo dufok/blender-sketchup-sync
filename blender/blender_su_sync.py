@@ -9,7 +9,7 @@
 bl_info = {
     "name": "SketchUp Sync (save-based bridge)",
     "author": "Stepan",
-    "version": (0, 2, 0),
+    "version": (0, 2, 1),
     "blender": (4, 0, 0),
     "location": "Properties > Scene > SketchUp Sync",
     "description": "Sync geometry+materials with SketchUp via a GLB bridge on save",
@@ -72,7 +72,8 @@ def get_collection(create=False):
 
 
 def enabled():
-    return bpy.context.scene.get("su_sync_enabled", True)
+    # sync is OFF by default; enable per-scene in Properties > Scene
+    return bpy.context.scene.get("su_sync_enabled", False)
 
 
 def sync_units(col):
@@ -469,7 +470,7 @@ def register():
     for c in CLASSES:
         bpy.utils.register_class(c)
     bpy.types.Scene.su_sync_enabled = bpy.props.BoolProperty(
-        name="Sync on save", default=True)
+        name="Sync on save", default=False)
     if _on_save_post not in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.append(_on_save_post)
     if _on_load_post not in bpy.app.handlers.load_post:

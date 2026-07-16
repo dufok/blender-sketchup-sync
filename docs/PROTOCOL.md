@@ -74,4 +74,13 @@ SketchUp при импорте сливает треугольники и мен
 3. **`model.import` GLB** — не должен открывать диалог размещения; если открывает,
    переходить на импорт через временный отдельный процесс/деф (см. import_glb fallback).
 4. **Blender export в таймере** — если `bpy.ops.export_scene.gltf` ругается на
-   контекст, обернуть в `bpy.context.temp_override(...)` с
+   контекст, обернуть в `bpy.context.temp_override(...)` с первым окном.
+
+## Исследовательская база (прецеденты)
+
+- TCP-мост внутри SketchUp: [zinin/sketchup-mcp2](https://github.com/zinin/sketchup-mcp2),
+  [mhyrr/sketchup-mcp](https://github.com/mhyrr/sketchup-mcp)
+- Blender-сторона: [ahujasid/blender-mcp](https://github.com/ahujasid/blender-mcp)
+- Полный real-time sync (эталон архитектуры): [ubisoft/mixer](https://github.com/ubisoft/mixer)
+- Observers best practices: [Observers2016.pdf](https://assets.sketchup.com/files/ewh/Observers2016.pdf)
+- Обмен через сервер: [Speckle](https://speckle.systems/integrations/)
